@@ -11,9 +11,9 @@ if __name__ == '__main__':
     val = df_remain.sample(frac=2/3)
     test = df_remain[~df_remain.index.isin(val.index)]
 
-    train.to_csv(r'G:\dataset\BirdClef\vacation\train_file\source\source_train.csv')
-    val.to_csv(r'G:\dataset\BirdClef\vacation\train_file\source\source_validation.csv')
-    test.to_csv(r'G:\dataset\BirdClef\vacation\train_file\source\source_test.csv')
+    train.to_csv(r'G:\dataset\BirdClef\vacation\spectrum\limitspecs\train.csv')
+    val.to_csv(r'G:\dataset\BirdClef\vacation\spectrum\limitspecs\validation.csv')
+    test.to_csv(r'G:\dataset\BirdClef\vacation\spectrum\limitspecs\test.csv')
 
 
     # Get the source and target data from train file

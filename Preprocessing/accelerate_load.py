@@ -1,10 +1,54 @@
 # To make a tensorflow dataset generator to make training faster
 
 import tensorflow as tf
+from tensorflow import keras
+from keras import backend as K
+import pandas as pd
+import os
 # import tensorflow.contrib.eager as tfe
 # tfe.enable_eager_execution()
+tf.compat.v1.disable_eager_execution()
 
 from Preprocessing.generator_for_tf import Data_Gener
+
+class tf_data_generator(object):
+    def __init__(self, label_path, csv_dir, spec_dir, class_num, img_size=[256, 512]):
+        self.label_path = label_path
+        self.csv_dir = csv_dir
+        self.spec_dir = spec_dir
+        self.class_num = class_num
+        self._gen = Data_Gener(mode='Species', Img_size=img_size,
+                              label_path=label_path,
+                              limit_species=class_num)
+
+    def gen_return(self, file_mode, batchsize, aug):
+        # There is a trick about naming method. so there is a variable about file_mode
+        if file_mode not in ['train', 'test', 'validation']:
+            assert ValueError('file_mode must be one of the ["train", "test", "validation"]')
+        filep = os.path.join(
+            self.csv_dir,
+            self.csv_dir.split('\\')[-1] + '_' + file_mode + '.csv'
+            )
+
+        file_size = self._gen.data_size(filep)
+
+        tf_gener = tf.data.Dataset.from_generator(self._gen.data_gener, output_types=(tf.float64, tf.uint8),
+                                                  output_shapes=((256, 512), (self.class_num)),
+                                                  args=(filep, self.spec_dir, aug),
+                                                  )
+        gen_ = tf_gener.repeat().cache().batch(batchsize).prefetch(tf.data.experimental.AUTOTUNE)
+        gen = self.make_iterator(gen_)
+
+        return gen, file_size
+
+    def make_iterator(self, dataset):
+        iterator = tf.compat.v1.data.make_initializable_iterator(dataset)
+        # iterator = dataset.make_initializable_iterator()
+        next_batch = iterator.get_next()
+
+        with K.get_session().as_default() as sess:
+            while True:
+                yield sess.run(next_batch)
 
 if __name__ == '__main__':
     # if the data can fits our memory, we can use tf.data.Dataset.from_tensor_slices
@@ -36,7 +80,7 @@ if __name__ == '__main__':
                                               )
     # gen = tf_gener.repeat()
     data = []
-    gen = tf_gener.repeat().batch(16)
+    gen = tf_gener.repeat().batch(427)
     iterator = gen.make_initializable_iterator()
     x, y = iterator.get_next()
 
