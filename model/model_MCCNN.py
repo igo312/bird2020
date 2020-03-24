@@ -1,11 +1,17 @@
-import keras
+from tensorflow import keras
 import tensorflow as tf
-from keras.optimizers import Adam, SGD
-from keras.layers import Conv2D, Dense, concatenate, DepthwiseConv2D, Input
-from keras.layers import ReLU, BatchNormalization, Dropout, Flatten, MaxPooling2D
-from keras.models import clone_model, Sequential, Model
-import keras.backend as K
-from keras_gradient_accumulation import GradientAccumulation
+
+from tensorflow.keras import Input, Model
+from tensorflow.keras.layers import Conv2D, DepthwiseConv2D, Dense, BatchNormalization, ReLU
+from tensorflow.keras.layers import Add, Multiply, Lambda, concatenate, Dropout, GlobalAvgPool2D, Activation
+from tensorflow.keras.activations import sigmoid
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import Sequential
+from tensorflow.keras import backend as K
+from tensorflow.keras.callbacks import ModelCheckpoint, TensorBoard, ReduceLROnPlateau, EarlyStopping
+
+import runai.ga
+#from keras_gradient_accumulation import GradientAccumulation
 
 import os
 
@@ -23,9 +29,7 @@ class MCCNN():
 
     def __init__(self, lr, class_num, Img_size, accumulation_steps):
         # Input shape
-        self.img_rows, self.img_cols = Img_size[0], Img_size[1]
-        self.channels = 1
-        self.img_shape = (self.img_rows, self.img_cols, self.channels)
+        self.img_shape = Img_size
 
         self.src_flag = False
         self.disc_flag = False
@@ -33,23 +37,37 @@ class MCCNN():
         # src:source, tgt:target
         self.src_optimizer = Adam(lr)
         if accumulation_steps > 1 :
-            self.src_optimizer = GradientAccumulation(self.src_optimizer, accumulation_steps=accumulation_steps,)
+            self.src_optimizer = runai.ga.keras.optimizers.Optimizer(self.src_optimizer, steps=accumulation_steps,)
 
         # multi layer classify num dict
         self.clf_num = class_num
 
+
     def BN_CONV(self, x, FNum, FSize, strides=(1, 1)):
-        # The activation is relu default(it will add other activation in future)
-        x = Conv2D(FNum, FSize, padding='same', strides=strides)(x)
+        # The activation is relu default(it will layers.Add other activation in future)
+        x = Conv2D(FNum, FSize, strides=strides, padding='same')(x)
         x = BatchNormalization()(x)
         x = ReLU()(x)
         return x
 
+    def sigmoid_CONV(self, x, FNum, FSize, strides=(1, 1)):
+        # The activation is relu default(it will layers.Add other activation in future)
+        x = Conv2D(FNum, FSize, strides=strides, padding='same')(x)
+        x = self.SIGMOID(x)
+        return x
+
+    def sigmoid_FC(self, x, FNum):
+        # The activation is relu default(it will layers.Add other activation in future)
+        x = Dense(FNum)(x)
+        x = self.SIGMOID(x)
+        return x
+
     def BN_DepthConv(self, x, FSize, strides=(1, 1), depth_multiplier=1, use_bias=False):
-        x = DepthwiseConv2D(FSize, padding='same', strides=strides, depth_multiplier=depth_multiplier, use_bias=use_bias)(x)
+        x = DepthwiseConv2D(FSize, strides=strides, depth_multiplier=depth_multiplier, use_bias=use_bias, padding='same')(x)
         x = BatchNormalization()(x)
         x = ReLU()(x)
         return x
+
 
     def BN_FC(self, x, FNum):
         x = Dense(FNum)(x)
@@ -57,112 +75,171 @@ class MCCNN():
         x = ReLU()(x)
         return x
 
+    def res_block(self, x, FSize):
+        x2 = x
+        x1 = self.BN_CONV(x, x.shape[-1], FSize,)
+        x = Add()([x2,x1])
+        return x
 
-    def define_source_encoder(self, weights=None):
+    def resSA_block(self, x, FSize, res=True,):
+        x1 = self.BN_CONV(x, x.shape[-1], FSize, )
+        A = self.BN_CONV(x1, 1, 1)
+        A = self.sigmoid_CONV(A, 1, 1)
+        x1 = Multiply()([x1, A])
+        if res:
+            x2 = x
+            return Add()([x1,x2])
+        else:
+            return x1
+
+    def resCA_block(self, x, FSize, res=True):
+        x1 = self.BN_CONV(x, x.shape[-1], FSize)
+        A = GlobalAvgPool2D()(x1)
+        A = self.BN_FC(A, x1.shape[-1])
+        A = self.sigmoid_FC(A, x1.shape[-1])
+        x1 = Multiply()([x1, A])
+        if res:
+            x2 = x
+            return Add()([x1, x2])
+        else:
+            return x1
+
+    def signle_channel_model(self,x):
+        # Will do spatial attention here
+        x = self.resSA_block(x, 3, res=False)
+        x1 = self.BN_CONV(x,1,1)
+
+        # attention coefficent generate
+        A = GlobalAvgPool2D()(x1)
+        A = Dense(1)(A)
+        A = self.SIGMOID(A)
+        return A, Multiply()([A,x])
+
+    def signle_channel_model1(self,x):
+        # Will do spatial attention here
+        x = self.BN_CONV(x, 64, 3, strides=(2, 2))
+        x = self.BN_CONV(x,64,3,strides=(1,1))
+        x = self.resSA_block(x,3,res=False)
+        x = self.BN_CONV(x,128,3,strides=(2, 2))
+        x = self.BN_CONV(x, 128, 3, strides=(1, 1))
+        x = self.resSA_block(x,3,res=True)
+        x = self.BN_CONV(x,256,3,strides=(2, 2))
+        x = self.resSA_block(x, 3, res=True)
+
+        # attention coefficent generate
+        A = GlobalAvgPool2D()(x)
+        A = self.BN_FC(A, 32)
+        A = Dense(1)(A)
+        A = self.SIGMOID(A)
+        return A, Multiply()([A,x])
+
+    def SIGMOID(self,tensor):
+        return Lambda(sigmoid)(tensor)
+
+    def define_model(self, weights=None):
         # TODO（3/17） use average pooling.去掉全连接层也要试试
         self.source_encoder = Sequential()
         inp = Input(shape=self.img_shape)
         #  inp = Input(shape=[256, 256, 3])
         # 让初始层学习更多的粗略特征，用于保留
         # x = BatchNormalization()(inp)
-        x1 = self.BN_DepthConv(inp[:,:,:,1],3)
-        x2 = self.BN_DepthConv(inp[:,:,:,1],3)
-        x3 = self.BN_DepthConv(inp[:,:,:,1],3)
-        x1 = self.BN_CONV(x1[:, :, :, 1], 16, 3, strides=(2,2))
-        x2 = self.BN_CONV(x2[:, :, :, 1], 16, 3, strides=(2,2))
-        x3 = self.BN_CONV(x3[:, :, :, 2], 16, 3, strides=(2,2))
-        x = concatenate([x1,x2,x3])
-        x = self.BN_CONV(x, 16, 3, strides=(2,2))
-        x = self.BN_CONV(x, 64, 3)
-        x = self.res_block(x, 128, 3, strides=(2, 2))
-        x = self.res_block(x, 256, 3, strides=(2, 2))
 
+        ###############################################################################################################
+        # Model defining
+        # Error:AttributeError: 'NoneType' object has no attribute '_inbound_nodes'
+        # Solution:https://blog.csdn.net/m0_37974719/article/details/88887024
+        A1, x1 = self.signle_channel_model(self.Expand_Dim_Layer(self.SLICE(inp,0)))
+        A2, x2 = self.signle_channel_model(self.Expand_Dim_Layer(self.SLICE(inp,1)))
+        A3, x3 = self.signle_channel_model(self.Expand_Dim_Layer(self.SLICE(inp,2)))
+        # DO channel attetion here
+        x = concatenate([x1,x2,x3])
+
+        x = self.BN_DepthConv(x, 3, strides=(2,2), depth_multiplier=1)
+        x = self.resCA_block(x, 3, res=False)
+
+        x = self.BN_DepthConv(x, 3, strides=(2, 2), depth_multiplier=1)
+        x = self.BN_CONV(x, 6, 1)
+        x = self.resSA_block(x, 3, res=True)
+
+        x = self.BN_DepthConv(x, 3, strides=(2, 2), depth_multiplier=1)
+        x = self.resCA_block(x, 3, res=True)
+
+        x = self.BN_DepthConv(x, 3, strides=(2, 2), depth_multiplier=1)
+        x = self.BN_CONV(x, 12, 1)
+        x = self.resSA_block(x, 3, res=True)
+
+        x = self.BN_DepthConv(x, 3, strides=(2, 2), depth_multiplier=1)
+        x = self.BN_CONV(x, 24, 1)
+        x = GlobalAvgPool2D()(x)
         # x = self.res_block(x, 361, 3)
         # x = MaxPooling2D()(x)
-        self.source_encoder = Model(inputs=(inp), outputs=(x))
-        self.src_flag = True
 
-        if weights is not None:
-            # 从HDF5文件中加载权重到当前模型中, 默认情况下模型的结构将保持不变。\
-            # 如果想将权重载入不同的模型（有些层相同）中，则设置by_name=True，只有名字匹配的层才会载入权重
-            self.source_encoder.load_weights(weights, by_name=True)
-            # self.source_encoder.load_weights(weights)
-
-    def get_source_classifier(self, model, weights=None, mode=None):
-        # model已经经过编译了，只是采用了相应的input和output
-        # x = GlobalAvgPool2D()(model.output)
-        # Use globalAvgPool2D will cut off 3000000 (The total is 7200000)
-        x = Flatten()(model.output)
-        x = self.BN_FC(x, 128)
+        #x = self.BN_FC(x, 256)
+        #x = Dropout(0.5)(x)
+        x = self.BN_FC(x, 16)
         x = Dropout(0.5)(x)
-        print('The classify num is {}'.format(self.clf_num))
         x = Dense(self.clf_num, activation='softmax')(x)
-        source_classifier_model = Model(inputs=(model.input), outputs=(x), name=self.clf_mode + '_clf_model')
+        model = Model(inputs=(inp), outputs=(x))
 
+        print('The classify num is {}'.format(self.clf_num))
         if weights is not None:
             print('Loading pre-trained classifier model')
-            source_classifier_model.load_weights(weights)
-        return source_classifier_model
+            model.load_weights(weights)
+        return model
 
-    def define_target_encoder(self, weights=None):
-        # src_flag：应该是用来判断是否生成模型，如果false则生成模型
-        if not self.src_flag:
-            self.define_source_encoder()
-        # TODO:去看看clone_model这个函数怎么用
-        # Clone any `Model` instance.
-        with tf.device('/cpu:0'):
-            self.target_encoder = clone_model(self.source_encoder)
+    def Expand_Dim_Layer(self, tensor):
+        def expand_dim(tensor):
+            return K.expand_dims(tensor)
 
-        if weights is not None:
-            self.target_encoder.load_weights(weights, by_name=True)
+        return Lambda(expand_dim)(tensor)
 
-    def tensorboard_log(self, callback, names, logs, batch_no):
+    def SLICE(self, tensor, index):
+        def slice(tensor, index):
+            return tensor[:, :, :, index]
 
-        for name, value in zip(names, logs):
-            summary = tf.Summary()
-            summary_value = summary.value.add()
-            summary_value.simple_value = value
-            summary_value.tag = name
-            callback.writer.add_summary(summary, batch_no)
-            callback.writer.flush()
+        return Lambda(slice, arguments={'index': index})(tensor)
 
-    def train_source_model(self, source_gen, val_gen, model, epochs, steps_per_epoch, validation_steps, model_name, save_path,
-                           save_interval=10, start_epoch=0, lr=0.01, C_state=True):
+    def train_model(self, source_gen, val_gen, model, epochs, steps_per_epoch, validation_steps, model_name, save_path,
+                           save_interval=10, start_epoch=0,  C_state=True):
         # TODO: 加入loss融合训练， 增大batch的容量。
-        optimizer = Adam(lr=lr)
-        model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+        model.compile(loss='categorical_crossentropy', optimizer=self.src_optimizer, metrics=['accuracy'])
         if not os.path.isdir(save_path):
             os.mkdir(save_path)
 
         # ModelCheckpoint 回调类允许你定义检查模型权重的位置，文件应如何命名，以及在什么情况下创建模型的 Checkpoint。
-        saver = keras.callbacks.ModelCheckpoint(os.path.join(save_path, model_name + '{epoch:02d}-{val_acc:.2f}.hdf5'),
+        # verbose = 0
+        # 只有在 epoch_end 才有 val_loss因此{val_loss不可取}
+        saver = ModelCheckpoint(os.path.join(save_path, model_name + '-{epoch:02d}-.hdf5'),
                                                 monitor='val_loss',
-                                                verbose=1,
+                                                verbose=0,
                                                 save_best_only=False,
-                                                save_weights_only=True,
+                                                save_weights_only=False,
                                                 mode='auto',
-                                                period=save_interval)
+                                                save_freq=save_interval)
 
         # 用于自动调节学习率，factor代表衰减因子
-        scheduler = keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.8, patience=20, verbose=0,
+        scheduler = ReduceLROnPlateau(monitor='val_loss', factor=0.8, patience=20, verbose=0,
                                                       mode='min')
 
         # 用于提前终止训练防止过拟合
-        early = keras.callbacks.EarlyStopping(monitor='val_loss', patience=5)
+        early = EarlyStopping(monitor='val_loss', patience=5)
 
         tensorboard_save = os.path.join(save_path, 'tensorboard' + '\\' + model_name)
         if not os.path.isdir(tensorboard_save):
             os.mkdir(tensorboard_save)
 
-        visualizer = keras.callbacks.TensorBoard(log_dir=tensorboard_save,
-                                                 histogram_freq=0,
-                                                 write_graph=True,
-                                                 write_images=False)
+        visualizer = TensorBoard(log_dir=tensorboard_save,
+                                 histogram_freq=0,
+                                 write_graph=True,
+                                 write_images=False)
         # TODO:为什么一个fit_generator会创建多个tensorboard
         if C_state:
-            callbacks = [saver, scheduler, visualizer]
+            callbacks = [scheduler, visualizer, saver]
         else:
             callbacks = []
+
+        # how to prefetch data?
+        # 根据https://github.com/tensorflow.keras-team/tensorflow.keras/issues/12847
         model.fit_generator(source_gen,
                             steps_per_epoch=steps_per_epoch,
                             epochs=epochs,
@@ -172,7 +249,7 @@ class MCCNN():
                             initial_epoch=start_epoch,
                             )
 
-    def eval_source_classifier(self, test_gen, model, dataset='target', domain='Source'):
+    def eval_source_classifier(self, test_gen, model):
         # TODO: target 和 source数据划分怎么分呢？
         model.compile(loss='categorical_crossentropy', optimizer=self.src_optimizer, metrics=['accuracy'])
         scores = model.evaluate_generator(test_gen, 100)
@@ -183,3 +260,73 @@ class MCCNN():
         # print('%s %s Classifier Test accuracy:%.2f%%' % (dataset.upper(), domain, float(scores[1]) * 100))
 
 
+
+def get_conv_block(tensor, channels, strides, alpha=1.0, name=''):
+    channels = int(channels * alpha)
+
+    x = Conv2D(channels,
+               kernel_size=(3, 3),
+               strides=strides,
+               use_bias=False,
+               padding='same',
+               name='{}_conv'.format(name))(tensor)
+    x = BatchNormalization(name='{}_bn'.format(name))(x)
+    x = Activation('relu', name='{}_act'.format(name))(x)
+    return x
+
+
+def get_dw_sep_block(tensor, channels, strides, alpha=1.0, name=''):
+    """Depthwise separable conv: A Depthwise conv followed by a Pointwise conv."""
+    channels = int(channels * alpha)
+
+    # Depthwise
+    x = DepthwiseConv2D(kernel_size=(3, 3),
+                        strides=strides,
+                        use_bias=False,
+                        padding='same',
+                        name='{}_dw'.format(name))(tensor)
+    x = BatchNormalization(name='{}_bn1'.format(name))(x)
+    x = Activation('relu', name='{}_act1'.format(name))(x)
+
+    # Pointwise
+    x = Conv2D(channels,
+               kernel_size=(1, 1),
+               strides=(1, 1),
+               use_bias=False,
+               padding='same',
+               name='{}_pw'.format(name))(x)
+    x = BatchNormalization(name='{}_bn2'.format(name))(x)
+    x = Activation('relu', name='{}_act2'.format(name))(x)
+    return x
+
+
+def MOBV2(shape, num_classes, alpha=1.0, include_top=True, weights=None):
+    x_in = Input(shape=shape)
+
+    x = get_conv_block(x_in, 32, (2, 2), alpha=alpha, name='initial')
+
+    layers = [
+        (64, (1, 1)),
+        (128, (2, 2)),
+        (128, (1, 1)),
+        (256, (2, 2)),
+        (256, (1, 1)),
+        (512, (2, 2)),
+        *[(512, (1, 1)) for _ in range(5)],
+        (1024, (2, 2)),
+        (1024, (2, 2))
+    ]
+
+    for i, (channels, strides) in enumerate(layers):
+        x = get_dw_sep_block(x, channels, strides, alpha=alpha, name='block{}'.format(i))
+
+    if include_top:
+        x = GlobalAvgPool2D(name='global_avg')(x)
+        x = Dense(num_classes, activation='softmax', name='softmax')(x)
+
+    model = Model(inputs=x_in, outputs=x)
+
+    if weights is not None:
+        model.load_weights(weights, by_name=True)
+
+    return model

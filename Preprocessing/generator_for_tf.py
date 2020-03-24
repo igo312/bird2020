@@ -46,6 +46,8 @@ class Data_Gener():
         }
         self.IM_SIZE = Img_size # W, H
 
+
+
     def data_gener(self, data_file_path, spec_path, aug):
         '''
         :param data_file_path: a path of pd.DataFrame instance including an item infos:

@@ -25,7 +25,7 @@
 from scipy import ndimage, interpolate
 import python_speech_features as psf
 import scipy.io.wavfile as wave
-from Preprocessing.spec_gen.CEEMDAN_ICA import sigle_channel_ICA
+from librosa.core import stft
 
 import cv2
 import pandas as pd
@@ -33,7 +33,7 @@ import pandas as pd
 from multiprocessing import Pool
 import numpy as np
 import os
-
+from tqdm import tqdm
 from datetime import datetime
 
 # cd频率，与梅尔刻度相对应
@@ -155,43 +155,17 @@ def hasbird(spec, threshold=16):
 
     return isbird
 
-def GetMag(sigs, rate, winlen, winstep, NFFT, fuc_name='Rect'):
+def GetMag(sig, rate, winlen, winstep, NFFT, fuc_name='Rect'):
     '''获取输入音频的频谱图'''
-    # 采用了矩形窗
-    winfuc = {
-              'Rect': lambda x: np.ones((x,)),
-              'Hamming': lambda x: np.array([0.54 - 0.46 * np.cos(2 * np.pi * n / (x - 1)) for n in range(x)]),
-              'Hanning': lambda x: np.array([0.5 - 0.5 * np.cos(2 * np.pi * n / (x - 1)) for n in range(x)])
-              }
+    mag = stft(np.asfortranarray(sig), n_fft=NFFT, hop_length=int(winstep * rate), win_length=int(winlen * rate), window=fuc_name)
 
-    # 窗函数
-    # 得到一个frames，姑且认为是采样位置。函数返回一个矩阵，数目由framelen决定
-    # winlen代表窗口的时间跨度，winstep表示每次窗口前进的时间
-    # frames return Returns: an array of frames. Size is NUMFRAMES by frame_len.(这个函数利用窗函数对信号进行了分割)
-
-    spec_list = list()
-    for sig in sigs:
-        frames = psf.sigproc.framesig(sig, frame_len=winlen * rate, frame_step=winstep * rate, winfunc=winfuc[fuc_name])
-        # bank = fbank(sig, samplerate=48000,\
-        #             winlen=winlen, winstep=winstep,
-        #             nfilt=64, nfft=1024,
-        #             lowfreq=150, highfreq=15000)
-        # print('the frame len is {}'.format(winlen*rate)) # to testify if should use zero-padded
-        # NFFT – the FFT length to use. If NFFT > frame_len, the frames are zero-padded(to study: http://www.bitweenie.com/listings/fft-zero-padding/).
-        # zero-padded:Zero padding is a simple concept; it simply refers to adding zeros to end of a time-domain signal to increase its length.
-        # If frames is an NxD matrix, output will be Nx(NFFT/2+1). Each row will be the magnitude spectrum of the corresponding frame.
-        mag = psf.sigproc.magspec(frames, NFFT)
-        # 习惯上我们将频谱值表现在y轴上，故旋转
-        mag = np.rot90(mag)
-        spec_list.append(mag)
-
-    spec_list = np.asarray(spec_list)
-    return spec_list
+    # 习惯上我们将频谱值表现在y轴上，故旋转
+    return mag
 
 
 # 以下参数都直接来源于kahst's code
 # NFFT 通常取2的幂次
-def GetMultiMag(path, ICA, second=3, overlap=2, minlen=1, winlen=0.05, winstep=0.0097, NFFT=1024):
+def GetMultiMag(path, second=5, overlap=3, minlen=3, winlen=0.05, winstep=0.0097, NFFT=1024):
     # 考虑物种只有10种，数据量不大，减少second生成更多spec
 
     '''
@@ -205,74 +179,77 @@ def GetMultiMag(path, ICA, second=3, overlap=2, minlen=1, winlen=0.05, winstep=0
         '''
     # Read the audio
     rate, sig = wave.read(path)
-    # TODO: to get the speices as the file_name
-    # name = path
-    sig = ChangeSample(sig, rate=rate)
+
+
+    # sig = ChangeSample(sig, rate=rate)
+    # 存在双声道信号
+    if len(sig.shape) > 1:
+        sigs = sig[:,0]
+        for i in range(sig.shape[1]-1):
+            sigs = np.concatenate([sigs, sig[:,i]], axis=0)
+        sig = sigs
 
     # split into chunks with overlap
     sig_splits = []
     # overlap = second*0.5
+    croplen = int(second * rate)
     for i in range(0, len(sig), int((second - overlap) * rate)):
         # 分割之后将出现某些片段过短，这是不需要的故需要加入判断句
         split = sig[i:i + second * rate]
-        if len(split) != second * rate:
-            # We will quit the short split before, but this time we save it with appending zero points.
-            z = np.zeros(second * rate - len(split))
-            temp = np.append(split, z)
-            sig_splits.append(temp)
-        else:
-            sig_splits.append(split)
+        try:
+            if len(split) != second * rate:
+                # We will quit the short split before, but this time we save it with appending zero points.
+                if len(split) < minlen * rate:
+                    continue
+                else:
+                    zeros = np.zeros([croplen - split.shape[0]])
+                    split = np.concatenate([split, zeros], axis=0)
+        except:
+            print('Filename is {}, shape is {}'.format(path.split('\\')[-1], sig.shape))
+            raise ValueError
+        sig_splits.append(split)
 
-    # Doing fourier transform
-    if len(sig_splits) == 0:
-        return [0], [0]
+    Spec_list = []
+    # multiprocess function
+    for buff in sig_splits:
+        # 在获取频谱图之前我们需要进行预加重
+        pre = psf.sigproc.preemphasis(buff, coeff=0.95)
+
+        # 将buff转换为相应的频谱图
+        MagSpec = GetMag(pre, RATE, WinLen, WinStep, NFFT, fuc_name='hann')
+        # Get the power spec
+        MagSpec = abs(np.multiply(MagSpec, MagSpec))
+        MagSpec = MagSpec[:512, :]
+        # Normalize Process
+        MagSpec -= MagSpec.min(axis=None)
+        MagSpec /= MagSpec.max(axis=None)
+        # MagSpec = MagSpec[:256, :512]
+        magspec = cv2.resize(MagSpec, (256, 256))
+
+        # plt.imshow(MagSpec)
+        # plt.show()
+        # MagSpec *= 255
+        # has_bird = hasbird(magspec)
+        # log_Mag = np.log(MagSpec+1e-10)
+        # log_Mag = log_Mag.astype('float32')
+        # CepSpec = cv2.dct(log_Mag)
+        # we are prior to choose the low frequency data
+        # TODO:we can do some IDCT and calculate the simularity to prove the number choosed is right.
+
+        yield magspec
+
+def check(filename, strs):
+    if filename in strs:
+        return True
     else:
-        # TODO:there is a question is about how to make the length in temporal axis is same to others?
-        Spec_list = []
-
-        # multiprocess function
-        def process(sigs):
-            for buff in sig_splits:
-                # 在获取频谱图之前我们需要进行预加重
-                pre = psf.sigproc.preemphasis(buff, coeff=0.95)
-
-                # ICA 提取成分
-                if ICA:
-                   pre = ICA(pre, method='CEEMDAN')
-
-                # 将buff转换为相应的频谱图
-                MagSpec = GetMag(pre, RATE, WinLen, WinStep, NFFT, fuc_name='Hanning')
-                # Get the power spec
-                MagSpec = abs(np.multiply(MagSpec, MagSpec))
-                # Normalize Process
-                MagSpec -= MagSpec.min(axis=None)
-                MagSpec /= MagSpec.max(axis=None)
-                # MagSpec = MagSpec[:256, :512]
-                MagSpec = cv2.resize(magspec, (512, 256))
-
-                # plt.imshow(MagSpec)
-                # plt.show()
-                # MagSpec *= 255
-                has_bird = hasbird(magspec)
-                # log_Mag = np.log(MagSpec+1e-10)
-                # log_Mag = log_Mag.astype('float32')
-                # CepSpec = cv2.dct(log_Mag)
-                # we are prior to choose the low frequency data
-                # TODO:we can do some IDCT and calculate the simularity to prove the number choosed is right.
-                Spec_list.append([has_bird, buff, magspec])
-
-        pool = Pool(4)
-        pool.map(process, sig_splits)
-        pool.close()
-        pool.join()
-
-        return Spec_list
-
+        return False
 
 if __name__ == '__main__':
     # hyperparameter setting
-    WinLen = 0.05
-    WinStep = 0.0097
+    WinLen = 0.046
+    WinStep = 0.01
+    NFFT = 2048
+    second = 5
     noise = 0
 
     # species limit
@@ -280,18 +257,20 @@ if __name__ == '__main__':
 
     df_path = r'G:\dataset\BirdClef\vacation\static.csv'
     src_dir = r'G:\dataset\BirdClef\paper_dataset\wav'
-    spec_dir = r'G:\dataset\BirdClef\vacation\spec'
+    spec_dir = r'G:\dataset\BirdClef\vacation\spectrums_total\pure'
     if not os.path.exists(spec_dir):
         os.makedirs(spec_dir)
 
     df = pd.read_csv(df_path)
     df = df[df.Species.isin(limit)]
     species_list = list(set(df.Species))
-    print('{} the trasform species is {}'.format(datetime.now(), species_list))
+    # print('{} the trasform species is {}'.format(datetime.now(), species_list))
 
-    noise_index = 0
+    strs = ''.join(os.listdir(spec_dir))
+
+    file_index = 1
     print('Preprocessing start')
-    ICA_transofmer = sigle_channel_ICA(trails=10, n_component=3)
+
     for item in df.iterrows():
         # Get the wav path
         item = item[1]
@@ -300,17 +279,22 @@ if __name__ == '__main__':
         # Get the audio save path
         wav_name = FileName.split('.')[0]
 
-        wav_info = GetMultiMag(file_path, ICA_transofmer)
-        for index, info in enumerate(wav_info):
-            has_bird, buff, img = info[0], info[1], info[2]
+        if check(filename=wav_name, strs=strs):
+            print('index-{} filename-{} already processed'.format(file_index, wav_name))
+            file_index += 1
+            continue
+
+        wav_info = GetMultiMag(file_path, second=second, winlen=WinLen, winstep=WinStep, NFFT=NFFT)
+        for index, img in enumerate(wav_info):
+            has_bird = True
             # every spec_list
             if has_bird:
                 spec_name = wav_name + '-{}'.format(index) + '.png'
-                if not os.path.exists(save_img_dir):
-                    os.makedirs(save_img_dir)
                 cv2.imwrite(os.path.join(spec_dir, spec_name), img * 255)
-            else:
-                noise_name_img = wav_name + 'noise-{}'.format(noise_index) + '.png'
-                noise_index += 1
-                cv2.imwrite(os.path.join(noise_dir, noise_name_img), img * 255)
+            #else:
+            #    noise_name_img = wav_name + 'noise-{}'.format(noise_index) + '.png'
+            #    noise_index += 1
+            #    cv2.imwrite(os.path.join(noise_dir, noise_name_img), img * 255)
+        print('第{}个文件处理完毕，文件名--{}'.format(file_index, FileName))
+        file_index += 1
     print('Done.')

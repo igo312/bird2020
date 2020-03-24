@@ -1,53 +1,29 @@
-# -*- encoding:utf-8 -*-
-
-# single wav to complete ICA:截取一段音频，以音频中点为均值正态分布选择起点，在这一段音频中再截取若干个窗口当作多个麦克风
+# -*- coding:utf-8 -*-
+# 有论文采用了取倒谱的方法，在多尺度变换下，则将输入固定，不需要网络结构的调整，可以参考。但是倒谱对人不是很友好。
+# 更改图片的保存路径，一种鸟类存放所有图片， 不再是一段音频。 图片命名规则 ‘音频原文件名-{:index}’，文件名用来索取label，index用于保存
+# TODO：怎么消除一段音频的静音段？
+# TODO:多进程未完成
+# TODO:(3/20)提高NFFT，直接截取高频信号。
 
 from scipy import ndimage, interpolate
-import python_speech_features as psf
-from Preprocessing.spec_gen import sigproc
 import scipy.io.wavfile as wave
-from sklearn.decomposition import FastICA
+from scipy.io import loadmat
+from Preprocessing.spec_gen import sigproc
+from Preprocessing.spec_gen.CEEMDAN_ICA import sigle_channel_ICA
+from librosa.core import stft
 
 import cv2
 import pandas as pd
 
-import random
+import matplotlib.pyplot as plt
 import numpy as np
 import os
 
 from datetime import datetime
+import logging
 
-# cd频率，与梅尔刻度相对应
-RATE = 44100
 
-def ChangeSample(sig, rate):
-    # 做一个频率的判断，减少运算过程
-    if rate == RATE:
-        return sig
-    else:
-        '''
-        # 改变频率的运用：
-        # 1.得到音频时间长度，根据 采样频率*时间 = 采样数，获得相应的音频
-        # 2.在利用np.interpolate 差值函数即可
-        '''
-        # sig 是一个一维矩阵
-        duration = sig.shape[0] / rate
 
-        # 获得矩阵上的采样点位置
-        old = np.linspace(0, duration, sig.shape[0])
-        # int((sig.shape[0] / rate) * RATE采样点
-        new = np.linspace(0, duration, int((sig.shape[0] / rate) * RATE))
-
-        # 获得插值工具
-        # https://docs.scipy.org/doc/scipy/reference/tutorial/interpolate.html
-        inter = interpolate.interp1d(x=old, y=sig.T)  # x为采样点位置， y为相应数据，即在相应数据的位置上插值
-        # TODO: 为什么要转置呢？
-        new_sig = inter(new).T  # 这样即在新的采样位置上插值
-
-        # 保证数据为整数方便计算
-        new_sig = np.round(new_sig).astype(sig.dtype)
-        sig = new_sig
-    return sig
 
 def hasbird(spec, threshold=16):
     '''
@@ -135,163 +111,123 @@ def hasbird(spec, threshold=16):
 
     return isbird
 
-def single_to_multi(signal, target_channel=5):
-    if len(signal.shape) == 1:
-        # Expand channel dimension
-        signal = np.expand_dims(signal, axis=0)
-
-    for index in range(0, signal.shape-1, int((signal.shape-1)/(target_channel-1))):
-        signal = np.concatenate([signal,
-                                 np.expand_dims(np.append(signal[index:], signal[:index]), axis=0)],
-                                axis=0)
-    return signal
-
-def GetMag(sigs, rate, winlen, winstep, NFFT, fuc_name='Rect'):
+def GetMag(sig, rate, winlen, winstep, NFFT, fuc):
     '''获取输入音频的频谱图'''
-    # 采用了矩形窗
-    winfuc = {
-              'Rect': lambda x: np.ones((x,)),
-              'Hamming': lambda x: np.array([0.54 - 0.46 * np.cos(2 * np.pi * n / (x - 1)) for n in range(x)]),
-              'Hanning': lambda x: np.array([0.5 - 0.5 * np.cos(2 * np.pi * n / (x - 1)) for n in range(x)])
-              }
 
-    # 窗函数
-    # 得到一个frames，姑且认为是采样位置。函数返回一个矩阵，数目由framelen决定
-    # winlen代表窗口的时间跨度，winstep表示每次窗口前进的时间
-    # frames return Returns: an array of frames. Size is NUMFRAMES by frame_len.(这个函数利用窗函数对信号进行了分割)
+    mag = stft(np.asfortranarray(sig), n_fft=NFFT, hop_length=int(winstep*rate), win_length=int(winlen*rate),window=fuc)
+    if not isinstance(mag, np.ndarray):
+        print('frames return None')
+        return None
+    # 习惯上我们将频谱值表现在y轴上，故旋转
+    return mag
 
-    spec_list = list()
-    for sig in sigs:
-        frames = sigproc.delay_ica_framesig(sig, frame_len=winlen * rate, frame_step=winstep * rate, winfunc=winfuc[fuc_name])
-
-        mag = sigproc.magspec(frames, NFFT)
-        # 习惯上我们将频谱值表现在y轴上，故旋转
-        mag = np.rot90(mag)
-        spec_list.append(mag)
-
-    spec_list = np.asarray(spec_list)
-    return spec_list
+def concat(mags):
+    mag = np.concatenate([
+        np.expand_dims(mags[0], axis=2),
+        np.expand_dims(mags[1], axis=2),
+        np.expand_dims(mags[2], axis=2)
+    ],axis=2)
+    return mag
 
 # 以下参数都直接来源于kahst's code
 # NFFT 通常取2的幂次
-def GetMultiMag(path, ICA, second=5, overlap=2, minlen=1, winsecond=3, winlen=0.05, winstep=0.0097, NFFT=1024, rate=44100):
+def GetMultiMag(path, rate, second=5, overlap=3, minlen=3, winlen=0.05, winstep=0.0097, NFFT=1024, fuc='hann'):
     # 考虑物种只有10种，数据量不大，减少second生成更多spec
 
-    '''
-        :param path: the audio data path
-        :param second: we will cut the audio into chunks whose duration is param 'second'
-        :param WinlenList: it used for multi scale, it's a list with time data.
-        :param NFFT: the num of FFT
-        :return: return cepstrum list including three pic though some of them will be zeros cause there is function to check if there are enough valid signals in one spec
-        :param overlap: it should be a param but I delete it cause somewhere make it as half of second. And I ues it too
-        Attention: cause we get multi-scale spectrum so for the same output size.I add one more step to get cepstrum.
-        '''
     # Read the audio
-    sample_rate, sig = wave.read(path)
-    # TODO: to get the speices as the file_name
-    # name = path
-    sig = ChangeSample(sig, rate=rate)
+    sig = loadmat(path)
 
     # split into chunks with overlap
+    sig = sig['component']
     sig_splits = []
+
     # overlap = second*0.5
-    for i in range(0, len(sig), int((second - overlap) * rate)):
-        split = sig[i:i + second * rate]
-        if len(split) < minlen*rate:
-            pass
-        elif len(split) < second * rate:
+    croplen = int(second * rate)
+    for i in range(0, sig.shape[1], int((second - overlap) * rate)):
+        # 分割之后将出现某些片段过短，这是不需要的故需要加入判断句
+        split = sig[:,i:i + croplen]
+        if split.shape[1] != croplen:
             # We will quit the short split before, but this time we save it with appending zero points.
-            z = np.zeros(second * rate - len(split))
-            split = np.append(split, z)
+            if len(split) < minlen*rate:
+                continue
+            else:
+                zeros = np.zeros([split.shape[0], croplen-split.shape[1]])
+                split = np.concatenate([split,zeros],axis=1)
         sig_splits.append(split)
 
-
     # Doing fourier transform
-    if len(sig_splits) == 0:
-        return [0], [0]
-    else:
-        # TODO:there is a question is about how to make the length in temporal axis is same to others?
-        Spec_list = []
 
-        # multiprocess function
+    # TODO:there is a question is about how to make the length in temporal axis is same to others?
+    # multiprocess function
 
-        for buff in sig_splits:
-            # 在获取频谱图之前我们需要进行预加重
-            pre = psf.sigproc.preemphasis(buff, coeff=0.95)
+    for sigs in sig_splits:
+        # 在获取频谱图之前我们需要进行预加重
+        specs = []
+        for sig in sigs:
+            pre = sigproc.preemphasis(sig, coeff=0.95)
 
             # ICA 提取成分
-            pre = single_to_multi(pre, target_channel=5)
-            component = ICA.fit_transform(pre)
-            # TODO: The shape of pre ? hope to be length*n_component
-            pre = np.dot(component.T, pre).T # return length*n_component
+            #if ICA:
+            #   pre = ICA(pre, method='CEEMDAN')
 
             # 将buff转换为相应的频谱图
-            MagSpec = GetMag(pre, RATE, winlen, winstep, NFFT, fuc_name='Hanning')
+
+            MagSpec = GetMag(pre, rate, winlen, winstep, NFFT, fuc=fuc)
+            if not isinstance(MagSpec, np.ndarray):
+                continue
             # Get the power spec
-            MagSpec = abs(np.multiply(MagSpec, MagSpec))
+            MagSpec = abs(MagSpec)
             # Normalize Process
             MagSpec -= MagSpec.min(axis=None)
             MagSpec /= MagSpec.max(axis=None)
+            MagSpec = MagSpec[:512,:]
             # MagSpec = MagSpec[:256, :512]
-            magspec = cv2.resize(MagSpec, (512, 256))
+            magspec = cv2.resize(MagSpec, (256, 256))
+            specs.append(magspec)
+        yield concat(specs)
 
-            # plt.imshow(MagSpec)
-            # plt.show()
-            # MagSpec *= 255
-            has_bird = hasbird(magspec)
-            # log_Mag = np.log(MagSpec+1e-10)
-            # log_Mag = log_Mag.astype('float32')
-            # CepSpec = cv2.dct(log_Mag)
-            # we are prior to choose the low frequency data
-            # TODO:we can do some IDCT and calculate the simularity to prove the number choosed is right.
-            Spec_list.append([has_bird, buff, magspec])
-
-        return Spec_list
-
+def check(filename, strs):
+    if filename in strs:
+        return True
+    else:
+        return False
 
 if __name__ == '__main__':
     # hyperparameter setting
-    WinLen = 0.05
-    WinStep = 0.0097
-    noise = 0
+    WinLen = 0.046
+    WinStep = 0.01
+    NFFT = 2048
+    second = 5
+    rate = 44100
 
-    n_component = 5
-    iters = 500
-
-    # species limit
-    limit = ['devillei', 'leucostigma','fuscicauda','obsoletum','striaticollis','serva','leucophrys','mentalis','sulphuratus','ferruginea']
-
-    df_path = r'G:\dataset\BirdClef\vacation\static.csv'
-    src_dir = r'G:\dataset\BirdClef\paper_dataset\wav'
-    spec_dir = r'G:\dataset\BirdClef\vacation\spec'
+    src_dir = r'G:\dataset\BirdClef\vacation\ica'
+    spec_dir = r'G:\dataset\BirdClef\vacation\spectrums_total\ICAS1'
     if not os.path.exists(spec_dir):
         os.makedirs(spec_dir)
 
-    df = pd.read_csv(df_path)
-    df = df[df.Species.isin(limit)]
-    species_list = list(set(df.Species))
-    print('{} the trasform species is {}'.format(datetime.now(), species_list))
-
-    noise_index = 0
-    print('Preprocessing start')
-    ICA_transofmer = FastICA(n_component=n_component, max_iter=iters)
-    for item in df.iterrows():
-        # Get the wav path
-        item = item[1]
-        FileName = item['FileName']
-        file_path = os.path.join(src_dir, FileName)
+    matlists = os.listdir(src_dir)
+    strs = ''.join(os.listdir(spec_dir))
+    # 有些音频会因为太短而直接被放弃吧 LIFECLEF2017_BIRD_XC_WAV_RN49356.wav.mat， LIFECLEF2017_BIRD_XC_WAV_RN47572.wav.mat
+    for fileindex, matname in enumerate(matlists):
+        file_path = os.path.join(src_dir, matname)
         # Get the audio save path
-        wav_name = FileName.split('.')[0]
-
-        wav_info = GetMultiMag(file_path, ICA_transofmer)
-        for index, info in enumerate(wav_info):
-            has_bird, buff, img = info[0], info[1], info[2]
+        #wav_name = FileName.split('.')[0]
+        #if wav_name in exist_list:
+        #    continue
+        if check(filename=matname, strs=strs):
+            print('index-{} filename-{} already processed'.format(fileindex,matname))
+            continue
+        wav_info = GetMultiMag(file_path, rate=rate, second=second,winlen=WinLen, winstep=WinStep, NFFT=NFFT)
+        noise_index = 0
+        for index, img in enumerate(wav_info):
+            has_bird=True
             # every spec_list
             if has_bird:
-                spec_name = wav_name + '-{}'.format(index) + '.png'
+                spec_name = matname + '-{}'.format(index) + '.png'
                 cv2.imwrite(os.path.join(spec_dir, spec_name), img * 255)
             else:
-                noise_name_img = wav_name + 'noise-{}'.format(noise_index) + '.png'
+                noise_name_img = matname + 'noise-{}'.format(noise_index) + '.png'
                 noise_index += 1
                 cv2.imwrite(os.path.join(spec_dir, noise_name_img), img * 255)
+        print('index-{} filename-{} process done'.format(fileindex, matname))
     print('Done.')

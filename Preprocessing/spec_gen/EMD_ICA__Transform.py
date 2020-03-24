@@ -158,7 +158,7 @@ def GetMag(sig, ICA_transformer, rate, winlen, winstep, NFFT, fuc_name='Rect'):
     # winlen代表窗口的时间跨度，winstep表示每次窗口前进的时间
     # frames return Returns: an array of frames. Size is NUMFRAMES by frame_len.(这个函数利用窗函数对信号进行了分割)
 
-    frames = sigproc.emd_ica_framesig(sig, ICA_transformer=ICA_transformer, frame_len=winlen * rate, frame_step=winstep * rate, winfunc=winfuc[fuc_name])
+    frames = sigproc.framesig(sig, ICA_transformer=ICA_transformer, frame_len=winlen * rate, frame_step=winstep * rate, winfunc=winfuc[fuc_name])
     if not isinstance(frames, np.ndarray):
         print('frames return None')
         return None
