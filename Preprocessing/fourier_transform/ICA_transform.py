@@ -5,24 +5,15 @@
 # TODO:多进程未完成
 # TODO:(3/20)提高NFFT，直接截取高频信号。
 
-from scipy import ndimage, interpolate
-import scipy.io.wavfile as wave
+from scipy import ndimage
 from scipy.io import loadmat
 from Preprocessing.spec_gen import sigproc
-from Preprocessing.spec_gen.CEEMDAN_ICA import sigle_channel_ICA
 from librosa.core import stft
 
 import cv2
-import pandas as pd
 
-import matplotlib.pyplot as plt
 import numpy as np
 import os
-
-from datetime import datetime
-import logging
-
-
 
 
 def hasbird(spec, threshold=16):
@@ -192,6 +183,31 @@ def check(filename, strs):
     else:
         return False
 
+def loop(matlist, spec_dir, src_dir):
+
+    for fileindex, matname in enumerate(matlist):
+        file_path = os.path.join(src_dir, matname)
+        # file_path = os.path.join(src_dir, 'LIFECLEF2014_BIRDAMAZON_XC_WAV_RN207.wav.mat')
+        # Get the audio save path
+        # wav_name = FileName.split('.')[0]
+        # if wav_name in exist_list:
+        #    continue
+        if check(filename=matname, strs=strs):
+            print('index-{} filename-{} already processed'.format(fileindex, matname))
+            continue
+
+        wav_info = GetMultiMag(file_path, rate=rate, second=second, winlen=WinLen, winstep=WinStep, NFFT=NFFT)
+
+        noise_index = 0
+        for index, img in enumerate(wav_info):
+            has_bird = True
+            # every spec_list
+            if has_bird:
+                spec_name = matname + '-{}'.format(index) + '.png'
+                cv2.imwrite(os.path.join(spec_dir, spec_name), img * 255)
+        print('index-{} filename-{} process done'.format(fileindex, matname))
+    print('Done.')
+
 if __name__ == '__main__':
     # hyperparameter setting
     WinLen = 0.046
@@ -200,34 +216,17 @@ if __name__ == '__main__':
     second = 5
     rate = 44100
 
-    src_dir = r'G:\dataset\BirdClef\vacation\ica'
-    spec_dir = r'G:\dataset\BirdClef\vacation\spectrums_total\ICAS1'
+    src_dir = r'G:\dataset\BirdClef\vacation\ica\ica30'
+    src_dir_10 =  r'G:\dataset\BirdClef\vacation\ica\ica10'
+    spec_dir = r'G:\dataset\BirdClef\vacation\spectrums_total\ICA30S1'
     if not os.path.exists(spec_dir):
         os.makedirs(spec_dir)
 
-    matlists = os.listdir(src_dir)
+    # 在这里添加保存的数据
+    matlists1 = os.listdir(src_dir)
+    matlists0 = os.listdir(src_dir_10)
     strs = ''.join(os.listdir(spec_dir))
     # 有些音频会因为太短而直接被放弃吧 LIFECLEF2017_BIRD_XC_WAV_RN49356.wav.mat， LIFECLEF2017_BIRD_XC_WAV_RN47572.wav.mat
-    for fileindex, matname in enumerate(matlists):
-        file_path = os.path.join(src_dir, matname)
-        # Get the audio save path
-        #wav_name = FileName.split('.')[0]
-        #if wav_name in exist_list:
-        #    continue
-        if check(filename=matname, strs=strs):
-            print('index-{} filename-{} already processed'.format(fileindex,matname))
-            continue
-        wav_info = GetMultiMag(file_path, rate=rate, second=second,winlen=WinLen, winstep=WinStep, NFFT=NFFT)
-        noise_index = 0
-        for index, img in enumerate(wav_info):
-            has_bird=True
-            # every spec_list
-            if has_bird:
-                spec_name = matname + '-{}'.format(index) + '.png'
-                cv2.imwrite(os.path.join(spec_dir, spec_name), img * 255)
-            else:
-                noise_name_img = matname + 'noise-{}'.format(noise_index) + '.png'
-                noise_index += 1
-                cv2.imwrite(os.path.join(spec_dir, noise_name_img), img * 255)
-        print('index-{} filename-{} process done'.format(fileindex, matname))
-    print('Done.')
+    loop(matlists0, spec_dir, src_dir_10)
+    loop(matlists1, spec_dir, src_dir)
+

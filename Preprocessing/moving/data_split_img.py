@@ -2,12 +2,13 @@ import os
 import shutil
 import random
 from tqdm import tqdm
+random.seed(3333)
 
 if __name__ == '__main__':
-    spec_dir = r'G:\dataset\BirdClef\vacation\spectrums_total\pure'
-    train_dir = r'G:\dataset\BirdClef\vacation\spectrum\pure\train'
-    validation_dir = r'G:\dataset\BirdClef\vacation\spectrum\pure\validation'
-    test_dir = r'G:\dataset\BirdClef\vacation\spectrum\pure\test'
+    spec_dir = r'G:\dataset\BirdClef\vacation\spectrums_total\ICA30S1'
+    train_dir = r'G:\dataset\BirdClef\vacation\spectrum\ICA30S1\train'
+    validation_dir = r'G:\dataset\BirdClef\vacation\spectrum\ICA30S1\validation'
+    test_dir = r'G:\dataset\BirdClef\vacation\spectrum\ICA30S1\test'
 
     if not os.path.exists(train_dir):
         os.makedirs(train_dir)

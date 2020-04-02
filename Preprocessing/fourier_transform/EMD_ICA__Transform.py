@@ -16,17 +16,15 @@
 from scipy import ndimage, interpolate
 import scipy.io.wavfile as wave
 from Preprocessing.spec_gen import sigproc
-from Preprocessing.spec_gen.CEEMDAN_ICA import sigle_channel_ICA
+from Preprocessing.fourier_transform.CEEMDAN_ICA import sigle_channel_ICA
 
 import cv2
 import pandas as pd
 
-import matplotlib.pyplot as plt
 import numpy as np
 import os
 
 from datetime import datetime
-import logging
 
 
 def ChangeSample(sig, sig_rate, rate):

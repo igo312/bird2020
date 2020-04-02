@@ -8,7 +8,7 @@ from tensorflow.keras import Model, Input
 from tensorflow.keras.layers import Conv2D, GlobalAveragePooling2D, Reshape
 from tensorflow.keras.utils import plot_model
 
-from model.mobilenetv3.mobilenet_base import MobileNetBase
+from keras.model.mobilenetv3.mobilenet_base import MobileNetBase
 
 
 class MobileNetV3_Large(MobileNetBase):

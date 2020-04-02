@@ -1,15 +1,13 @@
 # To make a tensorflow dataset generator to make training faster
 
 import tensorflow as tf
-from tensorflow import keras
 from keras import backend as K
-import pandas as pd
 import os
 # import tensorflow.contrib.eager as tfe
 # tfe.enable_eager_execution()
 tf.compat.v1.disable_eager_execution()
 
-from Preprocessing.generator_for_tf import Data_Gener
+from Preprocessing.generator.generator_for_tf import Data_Gener
 
 class tf_data_generator(object):
     def __init__(self, label_path, csv_dir, spec_dir, class_num, img_size=[256, 512]):

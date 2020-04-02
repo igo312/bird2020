@@ -84,9 +84,14 @@ class generator():
                     # todo: pure命名规则的问题
                     try:
                         label_name = FileName.split('.wav')[0]
-                        label_name = self.data_info[self.data_info['FileName']==label_name+'.wav'].Species.values[0]
+                        if 'ica30' in label_name:
+                            label_name = label_name[5:]
+                        label_name = self.data_info[self.data_info['FileName'] == label_name + '.wav'].Species.values[0]
+
                     except:
                         label_name = FileName.split('-')[0]
+                        if 'ica30' in label_name:
+                            label_name = label_name[5:]
                         label_name = self.data_info[self.data_info['FileName'] == label_name + '.wav'].Species.values[0]
                     label = [0] * len(self.label_info.keys())
                     label[int(self.label_info[label_name])] = 1

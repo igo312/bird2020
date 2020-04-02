@@ -5,11 +5,9 @@ import sys
 sys.path.append(r'G:\bird2019')
 
 
-from model.CNN_transfer_tf import ADDA
-from Preprocessing.accelerate_load import tf_data_generator
+from keras.model.CNN_transfer_tf import ADDA
+from Preprocessing.generator.accelerate_load import tf_data_generator
 import argparse
-import time
-import os
 
 #from keras.backend import manual_variable_initialization
 #manual_variable_initialization(True)

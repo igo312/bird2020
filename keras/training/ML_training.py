@@ -10,10 +10,9 @@ sys.path.append(r'G:\bird2019')
 
 from Preprocessing.Training_Data_generator import Data_Gener
 import argparse
-from model.TCA import TCA
-from model.MMD import mmd_linear
-import time
-import os
+from keras.model.TCA import TCA
+from keras.model.MMD import mmd_linear
+
 
 #from keras.backend import manual_variable_initialization
 #manual_variable_initialization(True)
