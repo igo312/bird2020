@@ -96,3 +96,17 @@ Find out that **STFT** from `matlab` and `python` is different. And specs from `
 
 - 学点loss相关的知识
 
+
+**2020/7/30**
+
+ This programe is completed. 
+ Here's my [summary](https://discourse.aicrowd.com/t/a-little-thought-about-model/3337) for this program
+ Following opnions are some problem and correspodding solution:
+ - why I cannot reload model in both torch and keras => Cause when I generate label using `dict` like `label = {label_ID:range(ID_num)}` there is a random process so the label is not fixed 
+ - Proposing a multi-level model to fuse the **family,genus,species** data. The model is supposed to solve the unbalanced data problem and improve the model performance.
+ - The training data is too small to reflect the model performance. And I cannot solve the overfitting problem.
+ 
+ In the end, hope somebody can propose better idea based on my idea 
+ 
+ ![multilevel-model](https://discourse.aicrowd.com/uploads/default/original/2X/9/990232fbd3f7927769fbcfacb6d14cb9fd269661.png)
+
